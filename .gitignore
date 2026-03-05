@@ -1,0 +1,5 @@
+logs/watcher.log
+logs/uploaded.txt
+logs/watcher.pid
+logs/pull.pid
+*.pid
