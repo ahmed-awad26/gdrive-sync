@@ -433,6 +433,7 @@ menu_folders() {
 
     echo -e "$LINE"
     echo -e "   ${G}[A]${N}  Add new sync folder"
+    echo -e "   ${Y}[E]${N}  Edit a folder  (Drive path / direction)"
     echo -e "   ${R}[D]${N}  Remove a folder"
     echo -e "   ${D}[0]${N}  Back\n"
     read -rp "   Choose: " CH
@@ -553,6 +554,162 @@ menu_folders() {
           && echo -e "\n   ${G}[OK] Folder added!${N}" \
           || echo -e "\n   ${R}[ERR] Could not write config.sh${N}"
         source "$SCRIPT_DIR/config.sh"; pause ;;
+
+      # ── EDIT ────────────────────────────────────────────────
+      [Ee])
+        hdr "Edit Sync Folder"
+        echo -e "$LINE\n"
+        local j=1
+        for ENTRY in "${SYNC_FOLDERS[@]}"; do
+          IFS='|' read -r L D DIR <<< "$ENTRY"
+          local ARR
+          case "$DIR" in
+            up)   ARR="${G}↑ up${N}"   ;;
+            down) ARR="${C}↓ down${N}" ;;
+            both) ARR="${Y}↕ both${N}" ;;
+          esac
+          printf "   ${Y}[%d]${N}  %-28s  $ARR\n" "$j" "$(basename "$L")"
+          echo -e "         ${D}Drive :${N} ${C}${RCLONE_REMOTE}:${D}${N}"
+          j=$(( j + 1 ))
+        done
+        echo -e "   ${D}[0]${N}  Cancel\n"
+        read -rp "   Folder number to edit: " EDIT_NUM
+
+        if [ "$EDIT_NUM" = "0" ]; then continue; fi
+
+        if ! ([[ "$EDIT_NUM" =~ ^[0-9]+$ ]] && \
+              [ "$EDIT_NUM" -ge 1 ] && \
+              [ "$EDIT_NUM" -le "${#SYNC_FOLDERS[@]}" ]); then
+          echo -e "   ${R}[ERR] Invalid number${N}"; pause; continue
+        fi
+
+        IFS='|' read -r CUR_L CUR_D CUR_DIR <<< "${SYNC_FOLDERS[$((EDIT_NUM-1))]}"
+        echo ""
+        echo -e "   ${W}Editing:${N}  $(basename "$CUR_L")"
+        echo -e "   ${D}Current Drive path :${N} ${C}${RCLONE_REMOTE}:${CUR_D}${N}"
+        echo -e "   ${D}Current direction  :${N} ${Y}${CUR_DIR}${N}\n"
+        echo -e "   What would you like to change?\n"
+        echo -e "   ${Y}[1]${N}  Drive destination path"
+        echo -e "   ${Y}[2]${N}  Sync direction"
+        echo -e "   ${Y}[3]${N}  Both\n"
+        read -rp "   Choose [1-3]: " WHAT
+
+        NEW_D="$CUR_D"
+        NEW_DIR="$CUR_DIR"
+
+        # ── Edit Drive path ──────────────────────────────────
+        if [[ "$WHAT" == "1" || "$WHAT" == "3" ]]; then
+          echo ""
+          echo -e "   ${W}New Drive destination path${N}"
+          echo -e "   ${Y}[1]${N}  Type manually"
+          echo -e "   ${Y}[2]${N}  Browse Drive folders\n"
+          read -rp "   Choose [1/2]: " DRV_EDIT
+
+          if [ "$DRV_EDIT" = "2" ]; then
+            echo -e "\n   ${D}Fetching Drive folders...${N}"
+            local DRV_LIST=()
+            mapfile -t DRV_LIST < <(
+              rclone lsd "$RCLONE_REMOTE:" 2>/dev/null | awk '{print $NF}' | sort
+            )
+            if [ "${#DRV_LIST[@]}" -eq 0 ]; then
+              echo -e "   ${R}Cannot reach Drive.${N}"
+              read -rp "   Enter Drive path manually: " NEW_D
+            else
+              echo ""
+              local di=1
+              for F in "${DRV_LIST[@]}"; do
+                printf "   ${Y}[%d]${N}  📁 %s\n" "$di" "$F"
+                di=$(( di + 1 ))
+              done
+              echo -e "   ${D}[N]${N}  Type a new name\n"
+              read -rp "   Choose number or [N]: " DPICK2
+              if [[ "$DPICK2" =~ ^[0-9]+$ ]] && [ "$DPICK2" -ge 1 ] && \
+                 [ "$DPICK2" -le "${#DRV_LIST[@]}" ]; then
+                NEW_D="${DRV_LIST[$((DPICK2-1))]}"
+                echo -e "   ${G}Selected:${N} $NEW_D"
+                read -rp "   Add subfolder? (Enter to skip): " SUB2
+                [ -n "$SUB2" ] && NEW_D="$NEW_D/$SUB2"
+              else
+                read -rp "   Enter Drive path: " NEW_D
+              fi
+            fi
+          else
+            echo -e "   ${D}Current:${N} ${CUR_D}"
+            read -rp "   New Drive path: " NEW_D
+            [ -z "$NEW_D" ] && NEW_D="$CUR_D"
+          fi
+        fi
+
+        # ── Edit direction ───────────────────────────────────
+        if [[ "$WHAT" == "2" || "$WHAT" == "3" ]]; then
+          echo ""
+          echo -e "   ${W}New sync direction${N}\n"
+          echo -e "   ${G}[1]${N}  Upload only   (local ──► Drive)"
+          echo -e "   ${C}[2]${N}  Download only (local ◄── Drive)"
+          echo -e "   ${Y}[3]${N}  Both ways     (local ◄──► Drive)\n"
+          read -rp "   Choose [1-3]: " DIR_EDIT
+          case "$DIR_EDIT" in
+            1) NEW_DIR="up"   ;;
+            2) NEW_DIR="down" ;;
+            3) NEW_DIR="both" ;;
+            *) echo -e "   ${D}No change.${N}" ;;
+          esac
+        fi
+
+        # ── Preview & confirm ────────────────────────────────
+        echo ""
+        echo -e "   ${W}Preview after edit:${N}"
+        echo -e "   Local  : ${C}${CUR_L}${N}"
+        echo -e "   Drive  : ${C}${RCLONE_REMOTE}:${NEW_D}${N}"
+        echo -e "   Mode   : ${Y}${NEW_DIR}${N}\n"
+        read -rp "   Save changes? [Y/n]: " CONF_E
+        if [[ "$CONF_E" =~ ^[Nn]$ ]]; then
+          echo -e "   Cancelled."; pause; continue
+        fi
+
+        # ── Write: delete old entry, insert updated one ──────
+        _folders_del "$EDIT_NUM" && \
+        python3 - "$SCRIPT_DIR/config.sh" "$CUR_L|$NEW_D|$NEW_DIR" "$EDIT_NUM" << 'PYEOF'
+import sys, re
+cfg_path   = sys.argv[1]
+new_entry  = sys.argv[2]
+insert_pos = int(sys.argv[3]) - 1   # 0-based active index to insert at
+
+lines = open(cfg_path).read().splitlines()
+in_block = False
+active_count = 0
+insert_line = -1
+
+for i, line in enumerate(lines):
+    if re.match(r'^SYNC_FOLDERS=\(', line):
+        in_block = True
+        continue
+    if in_block and re.match(r'^\)', line):
+        # If position is beyond current entries, insert just before closing )
+        insert_line = i
+        break
+    if in_block:
+        stripped = line.strip()
+        if stripped and not stripped.startswith('#'):
+            if active_count == insert_pos:
+                insert_line = i
+                break
+            active_count += 1
+
+if insert_line == -1:
+    sys.exit(1)
+
+lines.insert(insert_line, '  "' + new_entry + '"')
+open(cfg_path, 'w').write('\n'.join(lines) + '\n')
+PYEOF
+
+        if [ $? -eq 0 ]; then
+          echo -e "   ${G}[OK] Folder updated!${N}"
+          source "$SCRIPT_DIR/config.sh"
+        else
+          echo -e "   ${R}[ERR] Could not update config.sh${N}"
+        fi
+        pause ;;
 
       # ── REMOVE ──────────────────────────────────────────────
       [Dd])
