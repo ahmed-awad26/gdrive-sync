@@ -329,6 +329,82 @@ pick_folder_for_action() {
   echo "$PICK_CH"
 }
 
+# ── Python helper: rewrite SYNC_FOLDERS in config.sh ──────────
+# Usage:
+#   _folders_add  "local|drive|dir"   → appends new entry (raw, unexpanded)
+#   _folders_del  N                   → removes the Nth active entry (1-based)
+#
+# Strategy: locate the SYNC_FOLDERS=( ... ) block by line numbers,
+# collect only the non-comment data lines, and act on them by index.
+# This avoids any path expansion mismatch ($HOME vs real path).
+
+_folders_add() {
+  local RAW_ENTRY="$1"          # e.g.  $HOME/storage/foo|GDriveSync/Foo|up
+  python3 - "$SCRIPT_DIR/config.sh" "$RAW_ENTRY" << 'PYEOF'
+import sys, re
+
+cfg_path  = sys.argv[1]
+new_entry = sys.argv[2]          # raw string, not expanded
+
+lines = open(cfg_path).read().splitlines()
+
+# Find closing ) of SYNC_FOLDERS block
+in_block = False
+close_idx = -1
+for i, line in enumerate(lines):
+    if re.match(r'^SYNC_FOLDERS=\(', line):
+        in_block = True
+    if in_block and re.match(r'^\)', line):
+        close_idx = i
+        break
+
+if close_idx == -1:
+    sys.exit(1)
+
+# Insert before closing )
+lines.insert(close_idx, '  "' + new_entry + '"')
+open(cfg_path, 'w').write('\n'.join(lines) + '\n')
+PYEOF
+}
+
+_folders_del() {
+  local DEL_IDX="$1"            # 1-based index of active (non-comment) entries
+  python3 - "$SCRIPT_DIR/config.sh" "$DEL_IDX" << 'PYEOF'
+import sys, re
+
+cfg_path = sys.argv[1]
+target   = int(sys.argv[2]) - 1   # 0-based
+
+lines = open(cfg_path).read().splitlines()
+
+# Identify the SYNC_FOLDERS block
+in_block = False
+active_count = 0
+remove_line  = -1
+
+for i, line in enumerate(lines):
+    if re.match(r'^SYNC_FOLDERS=\(', line):
+        in_block = True
+        continue
+    if in_block and re.match(r'^\)', line):
+        break
+    if in_block:
+        stripped = line.strip()
+        # active entry: non-empty, not a comment
+        if stripped and not stripped.startswith('#'):
+            if active_count == target:
+                remove_line = i
+                break
+            active_count += 1
+
+if remove_line == -1:
+    sys.exit(1)
+
+del lines[remove_line]
+open(cfg_path, 'w').write('\n'.join(lines) + '\n')
+PYEOF
+}
+
 # ═══════════════════════════════════════════════════════════════
 #   SYNC FOLDERS MENU
 # ═══════════════════════════════════════════════════════════════
@@ -343,13 +419,14 @@ menu_folders() {
       IFS='|' read -r L D DIR <<< "$ENTRY"
       local ARROW
       case "$DIR" in
-        up)   ARROW="${G}──►${N}" ;;
-        down) ARROW="${C}◄──${N}" ;;
-        both) ARROW="${Y}◄──►${N}" ;;
+        up)   ARROW="${G}──►  upload only${N}"   ;;
+        down) ARROW="${C}◄──  download only${N}" ;;
+        both) ARROW="${Y}◄──► both${N}"          ;;
       esac
-      printf "   ${Y}[%d]${N}  %-35s\n" "$i" "$(basename "$L")"
-      echo -e "         $ARROW  ${C}${RCLONE_REMOTE}:${D}${N}  ${D}($DIR)${N}"
-      echo -e "         ${D}Local:${N} $L"
+      printf "   ${Y}[%d]${N}  ${W}%s${N}\n" "$i" "$(basename "$L")"
+      echo -e "         $ARROW"
+      echo -e "         ${D}Local :${N} $L"
+      echo -e "         ${D}Drive :${N} ${C}${RCLONE_REMOTE}:${D}${N}"
       echo ""
       i=$(( i + 1 ))
     done
@@ -360,42 +437,157 @@ menu_folders() {
     echo -e "   ${D}[0]${N}  Back\n"
     read -rp "   Choose: " CH
 
+    # ── ADD ───────────────────────────────────────────────────
     case "$CH" in
       [Aa])
+        hdr "Add Sync Folder"
+        echo -e "$LINE\n"
+
+        # --- Local path: type or browse ---
+        echo -e "   ${W}Step 1 — Local path${N}"
+        echo -e "   ${Y}[1]${N}  Type path manually"
+        echo -e "   ${Y}[2]${N}  Browse common locations\n"
+        read -rp "   Choose [1/2]: " LOC_CH
+
+        if [ "$LOC_CH" = "2" ]; then
+          echo ""
+          echo -e "   ${W}Common local folders:${N}\n"
+          local COMMON_LOCALS=(
+            "\$HOME/storage/dcim/Camera"
+            "\$HOME/storage/downloads"
+            "\$HOME/storage/documents"
+            "\$HOME/storage/music"
+            "\$HOME/storage/pictures"
+            "\$HOME/storage/shared/WhatsApp/Media"
+            "\$HOME/storage/shared/Telegram"
+            "\$HOME/storage/shared/DriveSync"
+          )
+          local ci=1
+          for P in "${COMMON_LOCALS[@]}"; do
+            printf "   ${Y}[%d]${N}  %s\n" "$ci" "$P"
+            ci=$(( ci + 1 ))
+          done
+          echo ""
+          read -rp "   Choose number (or press Enter to type manually): " LPICK
+          if [[ "$LPICK" =~ ^[0-9]+$ ]] && [ "$LPICK" -ge 1 ] && \
+             [ "$LPICK" -le "${#COMMON_LOCALS[@]}" ]; then
+            NEW_LOCAL="${COMMON_LOCALS[$((LPICK-1))]}"
+            echo -e "   ${G}Selected:${N} $NEW_LOCAL"
+          else
+            read -rp "   Enter local path: " NEW_LOCAL
+          fi
+        else
+          read -rp "   Local path (e.g. \$HOME/storage/downloads): " NEW_LOCAL
+        fi
+
+        [ -z "$NEW_LOCAL" ] && echo -e "   ${R}[ERR] Empty path${N}" && pause && continue
+
+        # --- Drive path: type or browse ---
         echo ""
-        echo -e "   ${W}Add New Sync Folder${N}\n"
-        read -rp "   Local path  (e.g. $HOME/storage/downloads): " NEW_LOCAL
-        read -rp "   Drive path  (e.g. GDriveSync/Downloads):    " NEW_DRIVE
-        echo -e "   Direction:  ${Y}[1]${N} Upload only  ${Y}[2]${N} Download only  ${Y}[3]${N} Both"
+        echo -e "   ${W}Step 2 — Google Drive path${N}"
+        echo -e "   ${Y}[1]${N}  Type path manually"
+        echo -e "   ${Y}[2]${N}  Browse Drive root folders\n"
+        read -rp "   Choose [1/2]: " DRV_CH
+
+        if [ "$DRV_CH" = "2" ]; then
+          echo -e "\n   ${D}Fetching Drive folders...${N}"
+          local DRIVE_FOLDERS=()
+          mapfile -t DRIVE_FOLDERS < <(
+            rclone lsd "$RCLONE_REMOTE:" 2>/dev/null | awk '{print $NF}' | sort
+          )
+          if [ "${#DRIVE_FOLDERS[@]}" -eq 0 ]; then
+            echo -e "   ${R}Cannot reach Drive or no folders found.${N}"
+            read -rp "   Enter Drive path manually: " NEW_DRIVE
+          else
+            echo ""
+            local di=1
+            for F in "${DRIVE_FOLDERS[@]}"; do
+              printf "   ${Y}[%d]${N}  📁 %s\n" "$di" "$F"
+              di=$(( di + 1 ))
+            done
+            echo -e "   ${D}[N]${N}  Type a new subfolder name\n"
+            read -rp "   Choose number or [N]: " DPICK
+            if [[ "$DPICK" =~ ^[0-9]+$ ]] && [ "$DPICK" -ge 1 ] && \
+               [ "$DPICK" -le "${#DRIVE_FOLDERS[@]}" ]; then
+              NEW_DRIVE="${DRIVE_FOLDERS[$((DPICK-1))]}"
+              echo -e "   ${G}Selected:${N} $NEW_DRIVE"
+              # Optionally drill into subfolder
+              read -rp "   Add subfolder inside it? (e.g. Camera) [Enter to skip]: " SUB
+              [ -n "$SUB" ] && NEW_DRIVE="$NEW_DRIVE/$SUB"
+            else
+              read -rp "   Enter Drive path: " NEW_DRIVE
+            fi
+          fi
+        else
+          read -rp "   Drive path (e.g. GDriveSync/Camera): " NEW_DRIVE
+        fi
+
+        [ -z "$NEW_DRIVE" ] && echo -e "   ${R}[ERR] Empty path${N}" && pause && continue
+
+        # --- Direction ---
+        echo ""
+        echo -e "   ${W}Step 3 — Sync direction${N}\n"
+        echo -e "   ${G}[1]${N}  Upload only   (local ──► Drive)"
+        echo -e "   ${C}[2]${N}  Download only (local ◄── Drive)"
+        echo -e "   ${Y}[3]${N}  Both ways     (local ◄──► Drive)\n"
         read -rp "   Choose [1-3]: " DIR_CH
         case "$DIR_CH" in
           1) NEW_DIR="up"   ;;
           2) NEW_DIR="down" ;;
           3) NEW_DIR="both" ;;
-          *) echo -e "${R}   Invalid${N}"; pause; continue ;;
+          *) echo -e "   ${R}Invalid${N}"; pause; continue ;;
         esac
-        local NEW_ENTRY="  \"$NEW_LOCAL|$NEW_DRIVE|$NEW_DIR\""
-        sed -i "/^SYNC_FOLDERS=(/,/^)/{/^)/i\\$NEW_ENTRY
-}" "$SCRIPT_DIR/config.sh"
-        echo -e "\n   ${G}[OK] Folder added!${N}"
+
+        # --- Confirm & write ---
+        echo ""
+        echo -e "   ${W}Confirm:${N}"
+        echo -e "   Local  : ${C}$NEW_LOCAL${N}"
+        echo -e "   Drive  : ${C}$RCLONE_REMOTE:$NEW_DRIVE${N}"
+        echo -e "   Mode   : ${Y}$NEW_DIR${N}\n"
+        read -rp "   Add this folder? [Y/n]: " CONF
+        if [[ "$CONF" =~ ^[Nn]$ ]]; then
+          echo -e "   Cancelled."; pause; continue
+        fi
+
+        _folders_add "$NEW_LOCAL|$NEW_DRIVE|$NEW_DIR" \
+          && echo -e "\n   ${G}[OK] Folder added!${N}" \
+          || echo -e "\n   ${R}[ERR] Could not write config.sh${N}"
         source "$SCRIPT_DIR/config.sh"; pause ;;
+
+      # ── REMOVE ──────────────────────────────────────────────
       [Dd])
         echo ""
-        read -rp "   Folder number to remove: " DEL_NUM
+        echo -e "   ${W}Remove Sync Folder${N}\n"
+        local j=1
+        for ENTRY in "${SYNC_FOLDERS[@]}"; do
+          IFS='|' read -r L D DIR <<< "$ENTRY"
+          printf "   ${R}[%d]${N}  %-30s  ${D}(%s)${N}\n" "$j" "$(basename "$L")" "$DIR"
+          j=$(( j + 1 ))
+        done
+        echo -e "   ${D}[0]${N}  Cancel\n"
+        read -rp "   Number to remove: " DEL_NUM
+
+        if [ "$DEL_NUM" = "0" ]; then continue; fi
+
         if [[ "$DEL_NUM" =~ ^[0-9]+$ ]] && \
            [ "$DEL_NUM" -ge 1 ] && [ "$DEL_NUM" -le "${#SYNC_FOLDERS[@]}" ]; then
-          local DEL_PATH
-          IFS='|' read -r DEL_PATH _ _ <<< "${SYNC_FOLDERS[$((DEL_NUM-1))]}"
-          python3 -c "
-path = open('$SCRIPT_DIR/config.sh').read()
-lines = [l for l in path.splitlines() if '$DEL_PATH' not in l or l.strip().startswith('#')]
-open('$SCRIPT_DIR/config.sh','w').write('\n'.join(lines)+'\n')
-" 2>/dev/null && echo -e "\n   ${G}[OK] Removed!${N}" || echo -e "\n   ${R}[ERR] Edit config.sh manually${N}"
-          source "$SCRIPT_DIR/config.sh"
+
+          IFS='|' read -r SHOW_L SHOW_D SHOW_DIR <<< "${SYNC_FOLDERS[$((DEL_NUM-1))]}"
+          echo -e "\n   ${R}Will remove:${N}  $(basename "$SHOW_L")  →  $RCLONE_REMOTE:$SHOW_D  ($SHOW_DIR)"
+          read -rp "   Confirm removal? [y/N]: " CONF2
+          if [[ "$CONF2" =~ ^[Yy]$ ]]; then
+            _folders_del "$DEL_NUM" \
+              && echo -e "   ${G}[OK] Removed!${N}" \
+              || echo -e "   ${R}[ERR] Could not write config.sh${N}"
+            source "$SCRIPT_DIR/config.sh"
+          else
+            echo -e "   Cancelled."
+          fi
         else
           echo -e "   ${R}[ERR] Invalid number${N}"
         fi
         pause ;;
+
       0) break ;;
     esac
   done
